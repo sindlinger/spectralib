@@ -51,13 +51,13 @@ inline bool CLLombInit(CLHandle &h)
 
    string code=
    "#pragma OPENCL EXTENSION cl_khr_fp64 : enable\n"
-   "__kernel void lombscargle_d64(const int x_shape, const int freqs_shape,\n"
+   "__kernel void lombscargle_d64(const int x_shape, const int freqs_shape, const int normalize,\n"
    "  __global const double* x, __global const double* y,\n"
    "  __global const double* freqs, __global double* pgram,\n"
    "  __global const double* y_dot){\n"
    "  int tid = (int)(get_global_id(0));\n"
    "  int stride = (int)get_global_size(0);\n"
-   "  double yD = (y_dot[0]==0.0)?1.0:(2.0/y_dot[0]);\n"
+   "  double yD = (normalize!=0) ? ((y_dot[0]==0.0)?1.0:(2.0/y_dot[0])) : 1.0;\n"
    "  for(int k=tid;k<freqs_shape;k+=stride){\n"
    "    double freq=freqs[k];\n"
    "    double xc=0.0, xs=0.0, cc=0.0, ss=0.0, cs=0.0;\n"
@@ -91,7 +91,7 @@ inline bool CLLombInit(CLHandle &h)
    return true;
   }
 
-inline bool CLLombscargle(CLHandle &h,const double &x[],const double &y[],const double &freqs[],double &pgram[])
+inline bool CLLombscargle(CLHandle &h,const double &x[],const double &y[],const double &freqs[],const bool normalize,double &pgram[])
   {
    int nx=ArraySize(x);
    int nf=ArraySize(freqs);
@@ -119,11 +119,12 @@ inline bool CLLombscargle(CLHandle &h,const double &x[],const double &y[],const 
 
    CLSetKernelArg(h.kern,0,nx);
    CLSetKernelArg(h.kern,1,nf);
-   CLSetKernelArgMem(h.kern,2,h.memX);
-   CLSetKernelArgMem(h.kern,3,h.memY);
-   CLSetKernelArgMem(h.kern,4,h.memF);
-   CLSetKernelArgMem(h.kern,5,h.memP);
-   CLSetKernelArgMem(h.kern,6,memYdot);
+   CLSetKernelArg(h.kern,2,(int)(normalize?1:0));
+   CLSetKernelArgMem(h.kern,3,h.memX);
+   CLSetKernelArgMem(h.kern,4,h.memY);
+   CLSetKernelArgMem(h.kern,5,h.memF);
+   CLSetKernelArgMem(h.kern,6,h.memP);
+   CLSetKernelArgMem(h.kern,7,memYdot);
 
    uint offs[1]={0};
    uint work[1]={(uint)nf};

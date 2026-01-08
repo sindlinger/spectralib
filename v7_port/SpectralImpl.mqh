@@ -8,7 +8,7 @@
 #include "SpectralFFT.mqh"
 #include "SpectralOpenCL.mqh"
 
-// Lomb-Scargle periodogram (OpenCL float64 if available, CPU fallback)
+// Lomb-Scargle periodogram (OpenCL float64 only, no CPU fallback)
 inline void lombscargle(const double &x[],const double &y[],const double &freqs[],
                         const bool precenter,const bool normalize,double &pgram[])
   {
@@ -26,49 +26,12 @@ inline void lombscargle(const double &x[],const double &y[],const double &freqs[
      }
    for(int i=0;i<N;i++) y_in[i]=precenter ? (y[i]-mean) : y[i];
 
-   if(normalize)
+   static CLHandle clh;
+   if(!clh.ready) CLReset(clh);
+   if(!CLLombscargle(clh,x,y_in,freqs,normalize,pgram))
      {
-      // use OpenCL path with y_dot for normalization
-      static CLHandle clh;
-      if(!clh.ready) CLReset(clh);
-      if(CLLombscargle(clh,x,y_in,freqs,pgram)) return;
-     }
-
-   // CPU fallback
-   double y_dot=0.0;
-   if(normalize)
-     {
-      for(int i=0;i<N;i++) y_dot+=y_in[i]*y_in[i];
-      if(y_dot==0.0) y_dot=1.0;
-     }
-   for(int k=0;k<F;k++)
-     {
-      double freq=freqs[k];
-      double xc=0.0,xs=0.0,cc=0.0,ss=0.0,cs=0.0;
-      for(int j=0;j<N;j++)
-        {
-         double ang=freq*x[j];
-         double s=MathSin(ang);
-         double c=MathCos(ang);
-         xc+=y_in[j]*c;
-         xs+=y_in[j]*s;
-         cc+=c*c;
-         ss+=s*s;
-         cs+=c*s;
-        }
-      double tau=MathArctan2(2.0*cs,cc-ss)/(2.0*freq);
-      double s_tau=MathSin(freq*tau);
-      double c_tau=MathCos(freq*tau);
-      double c_tau2=c_tau*c_tau;
-      double s_tau2=s_tau*s_tau;
-      double cs_tau=2.0*c_tau*s_tau;
-      double term1=(c_tau*xc + s_tau*xs);
-      double term2=(c_tau*xs - s_tau*xc);
-      double denom1=(c_tau2*cc + cs_tau*cs + s_tau2*ss);
-      double denom2=(c_tau2*ss - cs_tau*cs + s_tau2*cc);
-      double p=0.5*((term1*term1)/denom1 + (term2*term2)/denom2);
-      if(normalize) p*=2.0/y_dot;
-      pgram[k]=p;
+      ArrayResize(pgram,0);
+      return;
      }
   }
 
