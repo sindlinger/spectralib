@@ -581,4 +581,65 @@ inline bool istft_1d_real(const Complex64 &Zxx[][],const double fs,const string 
    return true;
   }
 
+inline bool check_COLA_1d(const string window,const int nperseg,const int noverlap,const double tol)
+  {
+   if(nperseg<1) return false;
+   if(noverlap>=nperseg || noverlap<0) return false;
+   int step=nperseg-noverlap;
+   double win[];
+   CLGetWindow(window,nperseg,true,win);
+   double binsums[];
+   ArrayResize(binsums,step);
+   for(int i=0;i<step;i++) binsums[i]=0.0;
+   int nblocks = nperseg/step;
+   for(int b=0;b<nblocks;b++)
+     {
+      int start=b*step;
+      for(int i=0;i<step;i++) binsums[i]+=win[start+i];
+     }
+   int rem = nperseg%step;
+   if(rem!=0)
+     {
+      for(int i=0;i<rem;i++) binsums[i]+=win[nperseg-rem+i];
+     }
+   double tmp[];
+   ArrayResize(tmp,step);
+   for(int i=0;i<step;i++) tmp[i]=binsums[i];
+   double med;
+   _median_real(tmp,med);
+   double maxdev=0.0;
+   for(int i=0;i<step;i++)
+     {
+      double dev=MathAbs(binsums[i]-med);
+      if(dev>maxdev) maxdev=dev;
+     }
+   return (maxdev<tol);
+  }
+
+inline bool check_NOLA_1d(const string window,const int nperseg,const int noverlap,const double tol)
+  {
+   if(nperseg<1) return false;
+   if(noverlap>=nperseg || noverlap<0) return false;
+   int step=nperseg-noverlap;
+   double win[];
+   CLGetWindow(window,nperseg,true,win);
+   double binsums[];
+   ArrayResize(binsums,step);
+   for(int i=0;i<step;i++) binsums[i]=0.0;
+   int nblocks = nperseg/step;
+   for(int b=0;b<nblocks;b++)
+     {
+      int start=b*step;
+      for(int i=0;i<step;i++) binsums[i]+=win[start+i]*win[start+i];
+     }
+   int rem = nperseg%step;
+   if(rem!=0)
+     {
+      for(int i=0;i<rem;i++) binsums[i]+=win[nperseg-rem+i]*win[nperseg-rem+i];
+     }
+   double minv=binsums[0];
+   for(int i=1;i<step;i++) if(binsums[i]<minv) minv=binsums[i];
+   return (minv>tol);
+  }
+
 #endif
