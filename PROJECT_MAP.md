@@ -18,6 +18,7 @@
 - `v7_port/SpectralOpenCL.mqh` (kernels auxiliares, ex.: Lomb-Scargle)
 - `v7_port/SpectralImpl.mqh` (spectral_helper/STFT; em port OpenCL)
 - `v7_port/SpectralWaveforms.mqh` (waveforms OpenCL float64)
+- `v7_port/SpectralWavelets.mqh` (wavelets OpenCL float64)
 
 ## Fluxo de dados (pipeline)
 1. Feed (x/y/serie de entrada)
@@ -51,6 +52,11 @@
   - Responsabilidade: waveforms (sawtooth, square, gausspulse, chirp, unit_impulse) em OpenCL.
   - Inputs: arrays t, parametros de forma/frequencia.
   - Outputs: arrays de saida (double).
+
+- `SpectralWavelets.mqh`
+  - Responsabilidade: wavelets (qmf, morlet, morlet2, ricker, cwt) em OpenCL.
+  - Inputs: dados, parametros de wavelet, widths.
+  - Outputs: vetores/matrizes reais ou complexas.
 
 - `SavitzkyGolay.mqh`
   - Responsabilidade: coeficientes SG + convolucao (port OpenCL)
