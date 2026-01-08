@@ -226,10 +226,6 @@ inline bool spectral_helper_psd_1d(const double &x_in[],const double &y_in[],con
       _spectral_helper_1d(y,y,fs,window,nperseg,noverlap,nfft,detrend_type,return_onesided,scaling,"stft",boundary,padded,tfreqs,tt,Y);
       if(ArrayRange(Y,0)==0) { ArrayResize(result,0,0); return false; }
      }
-   else
-     {
-      Y=X;
-     }
 
    int nseg=ArrayRange(X,0);
    int nfreq=ArrayRange(X,1);
@@ -241,7 +237,7 @@ inline bool spectral_helper_psd_1d(const double &x_in[],const double &y_in[],con
       for(int k=0;k<nfreq;k++)
         {
          Complex64 cx=CxConj(X[s][k]);
-         Complex64 cy=Y[s][k];
+         Complex64 cy = same_data ? X[s][k] : Y[s][k];
          result[s][k]=CxMul(cx,cy);
         }
      }
@@ -426,6 +422,163 @@ inline bool spectrogram_complex_1d(const double &x[],const double fs,const strin
                                    double &freqs[],double &t[],Complex64 &Sxx[][])
   {
    return stft_1d(x,fs,window,nperseg,noverlap,nfft,detrend_type,return_onesided,scaling,"",false,freqs,t,Sxx);
+  }
+
+inline bool coherence_1d(const double &x[],const double &y[],const double fs,const string window,int nperseg,int noverlap,int nfft,
+                         const int detrend_type,const bool return_onesided,const string scaling,const string average,
+                         double &freqs[],double &Cxy[])
+  {
+   Complex64 Pxy[];
+   if(!csd_1d(x,y,fs,window,nperseg,noverlap,nfft,detrend_type,return_onesided,scaling,average,freqs,Pxy))
+     { ArrayResize(Cxy,0); return false; }
+   double Pxx[], Pyy[], f2[];
+   if(!welch_1d(x,fs,window,nperseg,noverlap,nfft,detrend_type,return_onesided,scaling,average,f2,Pxx))
+     { ArrayResize(Cxy,0); return false; }
+   if(!welch_1d(y,fs,window,nperseg,noverlap,nfft,detrend_type,return_onesided,scaling,average,f2,Pyy))
+     { ArrayResize(Cxy,0); return false; }
+   int nfreq=ArraySize(Pxy);
+   ArrayResize(Cxy,nfreq);
+   for(int k=0;k<nfreq;k++)
+     {
+      double denom=Pxx[k]*Pyy[k];
+      if(denom<=0.0) Cxy[k]=0.0;
+      else
+        {
+         double num=CxAbs(Pxy[k]);
+         Cxy[k]=(num*num)/denom;
+        }
+     }
+   return true;
+  }
+
+inline bool istft_1d_complex(const Complex64 &Zxx[][],const double fs,const string window,int nperseg,int noverlap,int nfft,
+                             const bool input_onesided,const bool boundary,const string scaling,
+                             double &time[],Complex64 &x[])
+  {
+   int nseg=ArrayRange(Zxx,0);
+   int nfreq=ArrayRange(Zxx,1);
+   if(nseg<=0 || nfreq<=0) return false;
+
+   int n_default = input_onesided ? 2*(nfreq-1) : nfreq;
+   if(nperseg<=0) nperseg=n_default;
+   if(nperseg<1) return false;
+
+   if(nfft<=0)
+     {
+      if(input_onesided && nperseg==n_default+1) nfft=nperseg;
+      else nfft=n_default;
+     }
+   if(nfft<nperseg) return false;
+
+   if(noverlap<0) noverlap=nperseg/2;
+   if(noverlap>=nperseg) return false;
+   int nstep=nperseg-noverlap;
+
+   if(input_onesided)
+     {
+      int expected = (nfft%2==0) ? (nfft/2+1) : ((nfft+1)/2);
+      if(nfreq!=expected) return false;
+     }
+   else
+     {
+      if(nfreq!=nfft) return false;
+     }
+
+   double win[];
+   CLGetWindow(window,nperseg,true,win);
+   double wsum=0.0, wsum2=0.0;
+   for(int i=0;i<nperseg;i++){ wsum+=win[i]; wsum2+=win[i]*win[i]; }
+   double scale=1.0;
+   if(scaling=="spectrum") scale=wsum;
+   else if(scaling=="psd") scale=MathSqrt(fs*wsum2);
+   else return false;
+
+   // build full spectra (batch)
+   int N=nfft;
+   int batch=nseg;
+   Complex64 inFlat[];
+   ArrayResize(inFlat,batch*N);
+   for(int s=0;s<batch;s++)
+     {
+      int base=s*N;
+      for(int k=0;k<N;k++) inFlat[base+k]=Cx(0.0,0.0);
+      if(input_onesided)
+        {
+         for(int k=0;k<nfreq;k++) inFlat[base+k]=Zxx[s][k];
+         int kmax = (N%2==0)? (nfreq-2) : (nfreq-1);
+         for(int k=1;k<=kmax;k++)
+           inFlat[base + (N-k)] = CxConj(Zxx[s][k]);
+        }
+      else
+        {
+         if(nfreq!=N) return false;
+         for(int k=0;k<N;k++) inFlat[base+k]=Zxx[s][k];
+        }
+     }
+
+   static CLFFTPlan plan;
+   if(!plan.ready) CLFFTReset(plan);
+   if(!CLFFTInit(plan,N)) return false;
+   if(!CLFFTUploadComplexBatch(plan,inFlat,batch)) return false;
+   Complex64 outFlat[];
+   if(!CLFFTExecuteBatchFromMemA(plan,batch,outFlat,true)) return false;
+
+   int outlen = nperseg + (batch-1)*nstep;
+   ArrayResize(x,outlen);
+   double norm[];
+   ArrayResize(norm,outlen);
+   for(int i=0;i<outlen;i++){ x[i]=Cx(0.0,0.0); norm[i]=0.0; }
+
+   for(int s=0;s<batch;s++)
+     {
+      int start=s*nstep;
+      int base=s*N;
+      for(int i=0;i<nperseg;i++)
+        {
+         double wr=win[i];
+         Complex64 v=outFlat[base+i];
+         v.re*=scale; v.im*=scale;
+         x[start+i]=CxAdd(x[start+i],Cx(v.re*wr,v.im*wr));
+         norm[start+i]+=wr*wr;
+        }
+     }
+
+   if(boundary)
+     {
+      int cut=nperseg/2;
+      int newlen=outlen-2*cut;
+      if(newlen<=0) return false;
+      Complex64 xtmp[]; ArrayResize(xtmp,newlen);
+      double ntmp[]; ArrayResize(ntmp,newlen);
+      for(int i=0;i<newlen;i++){ xtmp[i]=x[i+cut]; ntmp[i]=norm[i+cut]; }
+      ArrayResize(x,newlen);
+      ArrayResize(norm,newlen);
+      for(int i=0;i<newlen;i++){ x[i]=xtmp[i]; norm[i]=ntmp[i]; }
+      outlen=newlen;
+     }
+
+   for(int i=0;i<outlen;i++)
+     {
+      double d=norm[i];
+      if(d>1e-10){ x[i].re/=d; x[i].im/=d; }
+     }
+
+   ArrayResize(time,outlen);
+   for(int i=0;i<outlen;i++) time[i]=(double)i/fs;
+   return true;
+  }
+
+inline bool istft_1d_real(const Complex64 &Zxx[][],const double fs,const string window,int nperseg,int noverlap,int nfft,
+                          const bool input_onesided,const bool boundary,const string scaling,
+                          double &time[],double &x[])
+  {
+   Complex64 xc[];
+   if(!istft_1d_complex(Zxx,fs,window,nperseg,noverlap,nfft,input_onesided,boundary,scaling,time,xc))
+     { ArrayResize(x,0); return false; }
+   int n=ArraySize(xc);
+   ArrayResize(x,n);
+   for(int i=0;i<n;i++) x[i]=xc[i].re;
+   return true;
   }
 
 #endif

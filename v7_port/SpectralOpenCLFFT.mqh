@@ -618,6 +618,23 @@ inline bool CLFFTExecuteBatchFromMemA(CLFFTPlan &p,const int batch,Complex64 &ou
    return true;
   }
 
+inline bool CLFFTUploadComplexBatch(CLFFTPlan &p,const Complex64 &inFlat[],const int batch)
+  {
+   if(!p.ready || batch<=0) return false;
+   if(!CLFFTEnsureBatchBuffers(p,batch)) return false;
+   int N=p.N;
+   long total=(long)batch*(long)N;
+   double buf[];
+   ArrayResize(buf,2*total);
+   for(long i=0;i<total;i++)
+     {
+      buf[2*i]=inFlat[i].re;
+      buf[2*i+1]=inFlat[i].im;
+     }
+   CLBufferWrite(p.memA,buf);
+   return true;
+  }
+
 inline void CLFFTRealForward(CLFFTPlan &p,const double &x[],Complex64 &out[])
   {
    int N=ArraySize(x);
