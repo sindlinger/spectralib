@@ -151,13 +151,26 @@ inline void _spectral_helper_1d(const double &x_in[],const double &y_in[],
    // freqs
    int nfreq = return_onesided ? (nfft/2+1) : nfft;
    ArrayResize(freqs,nfreq);
-   for(int k=0;k<nfreq;k++) freqs[k]= (double)k*fs/(double)nfft;
+   for(int k=0;k<nfreq;k++)
+     {
+      if(return_onesided) freqs[k]=(double)k*fs/(double)nfft;
+      else
+        {
+         int kk=(k<=nfft/2)?k:(k-nfft);
+         freqs[k]=(double)kk*fs/(double)nfft;
+        }
+     }
 
    // times
    int nseg=ArrayRange(result,0);
    ArrayResize(t,nseg);
    double step=(double)(seglen-noverlap);
    for(int i=0;i<nseg;i++) t[i]=( (double)i*step + (double)seglen/2.0)/fs;
+   if(boundary!="")
+     {
+      double shift=(double)seglen/2.0/fs;
+      for(int i=0;i<nseg;i++) t[i]-=shift;
+     }
 
    // scaling
    if(scaling=="density")
@@ -178,6 +191,241 @@ inline void _spectral_helper_1d(const double &x_in[],const double &y_in[],
         for(int k=0;k<nfreq;k++)
            result[s][k]=CxScale(result[s][k],scale);
      }
+  }
+
+// PSD/CSD helper using STFT-scaled spectra (sqrt scaling inside _spectral_helper_1d)
+inline bool spectral_helper_psd_1d(const double &x_in[],const double &y_in[],const bool same_data,
+                                   const double fs,const string window,int nperseg,int noverlap,int nfft,
+                                   const int detrend_type,const bool return_onesided,
+                                   const string scaling,const string boundary,const bool padded,
+                                   double &freqs[],double &t[],Complex64 &result[][])
+  {
+   double x[]; ArrayCopy(x,x_in);
+   double y[];
+   if(!same_data) ArrayCopy(y,y_in);
+
+   int Nx=ArraySize(x);
+   int Ny=same_data?Nx:ArraySize(y);
+   if(Nx<=0 || Ny<=0) { ArrayResize(result,0,0); return false; }
+
+   // pad to equal length
+   if(!same_data && Nx!=Ny)
+     {
+      int Nmax = (Nx>Ny?Nx:Ny);
+      if(Nx<Nmax){ int old=Nx; ArrayResize(x,Nmax); for(int i=old;i<Nmax;i++) x[i]=0.0; Nx=Nmax; }
+      if(Ny<Nmax){ int old=Ny; ArrayResize(y,Nmax); for(int i=old;i<Nmax;i++) y[i]=0.0; Ny=Nmax; }
+     }
+
+   Complex64 X[][];
+   _spectral_helper_1d(x,x,fs,window,nperseg,noverlap,nfft,detrend_type,return_onesided,scaling,"stft",boundary,padded,freqs,t,X);
+   if(ArrayRange(X,0)==0) { ArrayResize(result,0,0); return false; }
+   Complex64 Y[][];
+   if(!same_data)
+     {
+      double tfreqs[]; double tt[];
+      _spectral_helper_1d(y,y,fs,window,nperseg,noverlap,nfft,detrend_type,return_onesided,scaling,"stft",boundary,padded,tfreqs,tt,Y);
+      if(ArrayRange(Y,0)==0) { ArrayResize(result,0,0); return false; }
+     }
+   else
+     {
+      Y=X;
+     }
+
+   int nseg=ArrayRange(X,0);
+   int nfreq=ArrayRange(X,1);
+   ArrayResize(result,nseg);
+   for(int s=0;s<nseg;s++) ArrayResize(result[s],nfreq);
+
+   for(int s=0;s<nseg;s++)
+     {
+      for(int k=0;k<nfreq;k++)
+        {
+         Complex64 cx=CxConj(X[s][k]);
+         Complex64 cy=Y[s][k];
+         result[s][k]=CxMul(cx,cy);
+        }
+     }
+
+   // onesided scaling for PSD/CSD
+   if(return_onesided)
+     {
+      int Nfft = nfft;
+      if(Nfft<=0) Nfft = nperseg;
+      int last = (Nfft%2)? (nfreq-1) : (nfreq-2);
+      for(int s=0;s<nseg;s++)
+        {
+         for(int k=1;k<=last;k++) result[s][k]=CxScale(result[s][k],2.0);
+        }
+     }
+
+   return true;
+  }
+
+inline double _median_bias_mql(const int n)
+  {
+   if(n<=1) return 1.0;
+   double sum=0.0;
+   for(int k=1;k<=((n-1)/2);k++)
+     {
+      double ii2=2.0*k;
+      sum += 1.0/(ii2+1.0) - 1.0/ii2;
+     }
+   return 1.0 + sum;
+  }
+
+inline void _median_real(double &vals[],double &med)
+  {
+   int n=ArraySize(vals);
+   if(n<=0) { med=0.0; return; }
+   ArraySort(vals,WHOLE_ARRAY,0,MODE_ASCEND);
+   if(n%2) med=vals[n/2];
+   else med=0.5*(vals[n/2-1]+vals[n/2]);
+  }
+
+inline bool csd_1d(const double &x[],const double &y[],const double fs,const string window,int nperseg,int noverlap,int nfft,
+                   const int detrend_type,const bool return_onesided,const string scaling,const string average,
+                   double &freqs[],Complex64 &Pxy[])
+  {
+   Complex64 Pseg[][];
+   double t[];
+   bool same_data=false;
+   if(!spectral_helper_psd_1d(x,y,same_data,fs,window,nperseg,noverlap,nfft,detrend_type,return_onesided,scaling,"",false,freqs,t,Pseg))
+     { ArrayResize(Pxy,0); return false; }
+   int nseg=ArrayRange(Pseg,0);
+   int nfreq=ArrayRange(Pseg,1);
+   ArrayResize(Pxy,nfreq);
+   if(nseg<=1)
+     {
+      for(int k=0;k<nfreq;k++) Pxy[k]=Pseg[0][k];
+      return true;
+     }
+
+   string avg=StringToLower(average);
+   if(avg=="mean")
+     {
+      for(int k=0;k<nfreq;k++)
+        {
+         double re=0.0, im=0.0;
+         for(int s=0;s<nseg;s++){ re+=Pseg[s][k].re; im+=Pseg[s][k].im; }
+         Pxy[k]=Cx(re/(double)nseg, im/(double)nseg);
+        }
+     }
+   else if(avg=="median")
+     {
+      double bias=_median_bias_mql(nseg);
+      double tmpRe[]; double tmpIm[];
+      ArrayResize(tmpRe,nseg);
+      ArrayResize(tmpIm,nseg);
+      for(int k=0;k<nfreq;k++)
+        {
+         for(int s=0;s<nseg;s++){ tmpRe[s]=Pseg[s][k].re; tmpIm[s]=Pseg[s][k].im; }
+         double medRe, medIm;
+         _median_real(tmpRe,medRe);
+         _median_real(tmpIm,medIm);
+         Pxy[k]=Cx(medRe/bias, medIm/bias);
+        }
+     }
+   else return false;
+
+   return true;
+  }
+
+inline bool welch_1d(const double &x[],const double fs,const string window,int nperseg,int noverlap,int nfft,
+                     const int detrend_type,const bool return_onesided,const string scaling,const string average,
+                     double &freqs[],double &Pxx[])
+  {
+   Complex64 Pxy[];
+   if(!csd_1d(x,x,fs,window,nperseg,noverlap,nfft,detrend_type,return_onesided,scaling,average,freqs,Pxy))
+     { ArrayResize(Pxx,0); return false; }
+   int nfreq=ArraySize(Pxy);
+   ArrayResize(Pxx,nfreq);
+   for(int k=0;k<nfreq;k++) Pxx[k]=Pxy[k].re;
+   return true;
+  }
+
+inline bool periodogram_1d(const double &x[],const double fs,const string window,int nfft,
+                           const int detrend_type,const bool return_onesided,const string scaling,
+                           double &freqs[],double &Pxx[])
+  {
+   int N=ArraySize(x);
+   if(N<=0) { ArrayResize(Pxx,0); return false; }
+   int nperseg = (nfft>0? MathMin(nfft,N) : N);
+   return welch_1d(x,fs,window,nperseg,0,nfft,detrend_type,return_onesided,scaling,"mean",freqs,Pxx);
+  }
+
+inline bool stft_1d(const double &x[],const double fs,const string window,int nperseg,int noverlap,int nfft,
+                    const int detrend_type,const bool return_onesided,const string scaling,
+                    const string boundary,const bool padded,
+                    double &freqs[],double &t[],Complex64 &Zxx[][])
+  {
+   _spectral_helper_1d(x,x,fs,window,nperseg,noverlap,nfft,detrend_type,return_onesided,scaling,"stft",boundary,padded,freqs,t,Zxx);
+   return (ArrayRange(Zxx,0)>0);
+  }
+
+inline bool spectrogram_1d(const double &x[],const double fs,const string window,int nperseg,int noverlap,int nfft,
+                           const int detrend_type,const bool return_onesided,const string scaling,
+                           const string mode,
+                           double &freqs[],double &t[],double &Sxx[][])
+  {
+   string m=StringToLower(mode);
+   if(m=="psd")
+     {
+      Complex64 Pxy[][];
+      if(!spectral_helper_psd_1d(x,x,true,fs,window,nperseg,noverlap,nfft,detrend_type,return_onesided,scaling,"",false,freqs,t,Pxy))
+        { ArrayResize(Sxx,0,0); return false; }
+      int nseg=ArrayRange(Pxy,0);
+      int nfreq=ArrayRange(Pxy,1);
+      ArrayResize(Sxx,nseg);
+      for(int s=0;s<nseg;s++)
+        {
+         ArrayResize(Sxx[s],nfreq);
+         for(int k=0;k<nfreq;k++) Sxx[s][k]=Pxy[s][k].re;
+        }
+      return true;
+     }
+   Complex64 Zxx[][];
+   if(!stft_1d(x,fs,window,nperseg,noverlap,nfft,detrend_type,return_onesided,scaling,"",false,freqs,t,Zxx))
+     { ArrayResize(Sxx,0,0); return false; }
+   int nseg=ArrayRange(Zxx,0);
+   int nfreq=ArrayRange(Zxx,1);
+   ArrayResize(Sxx,nseg);
+   for(int s=0;s<nseg;s++) ArrayResize(Sxx[s],nfreq);
+   if(m=="complex") return false;
+   if(m=="magnitude")
+     {
+      for(int s=0;s<nseg;s++) for(int k=0;k<nfreq;k++) Sxx[s][k]=CxAbs(Zxx[s][k]);
+      return true;
+     }
+   if(m=="angle" || m=="phase")
+     {
+      for(int s=0;s<nseg;s++)
+        {
+         for(int k=0;k<nfreq;k++) Sxx[s][k]=MathArctan2(Zxx[s][k].im,Zxx[s][k].re);
+         if(m=="phase")
+           {
+            // unwrap along frequency axis
+            double prev=Sxx[s][0];
+            for(int k=1;k<nfreq;k++)
+              {
+               double v=Sxx[s][k];
+               double dp=v-prev;
+               while(dp>PI) { v-=2.0*PI; dp=v-prev; }
+               while(dp<-PI) { v+=2.0*PI; dp=v-prev; }
+               Sxx[s][k]=v;
+               prev=v;
+              }
+           }
+        }
+      return true;
+     }
+   return false;
+  }
+
+inline bool spectrogram_complex_1d(const double &x[],const double fs,const string window,int nperseg,int noverlap,int nfft,
+                                   const int detrend_type,const bool return_onesided,const string scaling,
+                                   double &freqs[],double &t[],Complex64 &Sxx[][])
+  {
+   return stft_1d(x,fs,window,nperseg,noverlap,nfft,detrend_type,return_onesided,scaling,"",false,freqs,t,Sxx);
   }
 
 #endif
