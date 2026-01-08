@@ -17,6 +17,7 @@
 - `v7_port/SpectralWindows.mqh` (CPU ref; nao usar no caminho principal)
 - `v7_port/SpectralOpenCL.mqh` (kernels auxiliares, ex.: Lomb-Scargle)
 - `v7_port/SpectralImpl.mqh` (spectral_helper/STFT; em port OpenCL)
+- `v7_port/SpectralWaveforms.mqh` (waveforms OpenCL float64)
 
 ## Fluxo de dados (pipeline)
 1. Feed (x/y/serie de entrada)
@@ -45,6 +46,11 @@
   - Responsabilidade: spectral_helper/STFT (segmentacao, janela, detrend, FFT)
   - Inputs: series, fs, nperseg, noverlap, nfft, etc.
   - Outputs: freqs, times, result complex
+
+- `SpectralWaveforms.mqh`
+  - Responsabilidade: waveforms (sawtooth, square, gausspulse, chirp, unit_impulse) em OpenCL.
+  - Inputs: arrays t, parametros de forma/frequencia.
+  - Outputs: arrays de saida (double).
 
 - `SavitzkyGolay.mqh`
   - Responsabilidade: coeficientes SG + convolucao (port OpenCL)
