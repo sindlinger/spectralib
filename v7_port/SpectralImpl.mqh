@@ -520,28 +520,12 @@ inline bool istft_1d_complex(const Complex64 &Zxx[][],const double fs,const stri
    if(!plan.ready) CLFFTReset(plan);
    if(!CLFFTInit(plan,N)) return false;
    if(!CLFFTUploadComplexBatch(plan,inFlat,batch)) return false;
-   Complex64 outFlat[];
-   if(!CLFFTExecuteBatchFromMemA(plan,batch,outFlat,true)) return false;
+   if(!CLFFTExecuteBatchFromMemA_NoRead(plan,batch,true)) return false;
 
-   int outlen = nperseg + (batch-1)*nstep;
-   ArrayResize(x,outlen);
    double norm[];
-   ArrayResize(norm,outlen);
-   for(int i=0;i<outlen;i++){ x[i]=Cx(0.0,0.0); norm[i]=0.0; }
+   if(!CLFFTOverlapAddFromFinal(plan,batch,nperseg,nstep,N,win,scale,x,norm)) return false;
 
-   for(int s=0;s<batch;s++)
-     {
-      int start=s*nstep;
-      int base=s*N;
-      for(int i=0;i<nperseg;i++)
-        {
-         double wr=win[i];
-         Complex64 v=outFlat[base+i];
-         v.re*=scale; v.im*=scale;
-         x[start+i]=CxAdd(x[start+i],Cx(v.re*wr,v.im*wr));
-         norm[start+i]+=wr*wr;
-        }
-     }
+   int outlen=ArraySize(x);
 
    if(boundary)
      {
@@ -557,11 +541,7 @@ inline bool istft_1d_complex(const Complex64 &Zxx[][],const double fs,const stri
       outlen=newlen;
      }
 
-   for(int i=0;i<outlen;i++)
-     {
-      double d=norm[i];
-      if(d>1e-10){ x[i].re/=d; x[i].im/=d; }
-     }
+   // already normalized on GPU
 
    ArrayResize(time,outlen);
    for(int i=0;i<outlen;i++) time[i]=(double)i/fs;

@@ -21,11 +21,16 @@ struct CLFFTPlan
    int kern_load_b;
    int kern_sum_b;
    int kern_load_dt_b;
+   int kern_overlap;
+   int kern_norm;
    int memA;
    int memB;
    int memX;
    int memWin;
    int memSum;
+   int memOutX;
+   int memOutNorm;
+   int memFinal;
    int batch;
    int N;
    int lenX;
@@ -51,11 +56,16 @@ inline void CLFFTReset(CLFFTPlan &p)
    p.kern_load_b=INVALID_HANDLE;
    p.kern_sum_b=INVALID_HANDLE;
    p.kern_load_dt_b=INVALID_HANDLE;
+   p.kern_overlap=INVALID_HANDLE;
+   p.kern_norm=INVALID_HANDLE;
    p.memA=INVALID_HANDLE;
    p.memB=INVALID_HANDLE;
    p.memX=INVALID_HANDLE;
    p.memWin=INVALID_HANDLE;
    p.memSum=INVALID_HANDLE;
+   p.memOutX=INVALID_HANDLE;
+   p.memOutNorm=INVALID_HANDLE;
+   p.memFinal=INVALID_HANDLE;
    p.batch=1;
    p.N=0;
    p.lenX=0;
@@ -70,6 +80,9 @@ inline void CLFFTFree(CLFFTPlan &p)
    if(p.memX!=INVALID_HANDLE) { CLBufferFree(p.memX); p.memX=INVALID_HANDLE; }
    if(p.memWin!=INVALID_HANDLE) { CLBufferFree(p.memWin); p.memWin=INVALID_HANDLE; }
    if(p.memSum!=INVALID_HANDLE) { CLBufferFree(p.memSum); p.memSum=INVALID_HANDLE; }
+   if(p.memOutX!=INVALID_HANDLE) { CLBufferFree(p.memOutX); p.memOutX=INVALID_HANDLE; }
+   if(p.memOutNorm!=INVALID_HANDLE) { CLBufferFree(p.memOutNorm); p.memOutNorm=INVALID_HANDLE; }
+   p.memFinal=INVALID_HANDLE;
    if(p.kern_bitrev!=INVALID_HANDLE) { CLKernelFree(p.kern_bitrev); p.kern_bitrev=INVALID_HANDLE; }
    if(p.kern_stage!=INVALID_HANDLE) { CLKernelFree(p.kern_stage); p.kern_stage=INVALID_HANDLE; }
    if(p.kern_scale!=INVALID_HANDLE) { CLKernelFree(p.kern_scale); p.kern_scale=INVALID_HANDLE; }
@@ -84,6 +97,8 @@ inline void CLFFTFree(CLFFTPlan &p)
    if(p.kern_load_b!=INVALID_HANDLE) { CLKernelFree(p.kern_load_b); p.kern_load_b=INVALID_HANDLE; }
    if(p.kern_sum_b!=INVALID_HANDLE) { CLKernelFree(p.kern_sum_b); p.kern_sum_b=INVALID_HANDLE; }
    if(p.kern_load_dt_b!=INVALID_HANDLE) { CLKernelFree(p.kern_load_dt_b); p.kern_load_dt_b=INVALID_HANDLE; }
+   if(p.kern_overlap!=INVALID_HANDLE) { CLKernelFree(p.kern_overlap); p.kern_overlap=INVALID_HANDLE; }
+   if(p.kern_norm!=INVALID_HANDLE) { CLKernelFree(p.kern_norm); p.kern_norm=INVALID_HANDLE; }
    if(p.prog!=INVALID_HANDLE) { CLProgramFree(p.prog); p.prog=INVALID_HANDLE; }
    if(p.ctx!=INVALID_HANDLE) { CLContextFree(p.ctx); p.ctx=INVALID_HANDLE; }
    p.N=0; p.batch=1; p.ready=false;
@@ -189,6 +204,18 @@ inline bool CLFFTInit(CLFFTPlan &p,const int N)
    "    else if(detrend_type==2){ double n=(double)nperseg; double denom = n*sum_i2 - sum_i*sum_i; double m=0.0;\n"
    "      if(denom!=0.0) m=(n*s1 - sum_i*s0)/denom; double b=(s0-m*sum_i)/n; xi = xi - (m*(double)i + b); }\n"
    "    v = xi*win[i]; }} out[seg*nfft + i]=(double2)(v,0.0); }\n";
+   "__kernel void overlap_add_complex(__global const double2* seg, __global const double* win, int nseg, int nperseg, int nstep, int N, int outlen, double scale,\n"
+   "  __global double2* out, __global double* norm){\n"
+   "  int n=get_global_id(0); if(n>=outlen) return; double2 sum=(double2)(0.0,0.0); double ns=0.0;\n"
+   "  int smin = (n - (nperseg-1) + nstep - 1) / nstep; if(smin<0) smin=0;\n"
+   "  int smax = n / nstep; if(smax>nseg-1) smax=nseg-1;\n"
+   "  for(int s=smin;s<=smax;s++){\n"
+   "    int start=s*nstep; int idx=n-start; if(idx>=0 && idx<nperseg){ double w=win[idx]; double2 v=seg[s*N + idx];\n"
+   "      sum.x += v.x*w*scale; sum.y += v.y*w*scale; ns += w*w; }\n"
+   "  }\n"
+   "  out[n]=sum; norm[n]=ns; }\n"
+   "__kernel void overlap_normalize(__global double2* out, __global const double* norm, int n){\n"
+   "  int i=get_global_id(0); if(i>=n) return; double d=norm[i]; if(d>1.0e-10){ out[i].x/=d; out[i].y/=d; } }\n";
 
    p.prog=CLProgramCreate(p.ctx,code);
    if(p.prog==INVALID_HANDLE) { CLFFTFree(p); return false; }
@@ -206,8 +233,11 @@ inline bool CLFFTInit(CLFFTPlan &p,const int N)
    p.kern_load_b=CLKernelCreate(p.prog,"load_real_segment_batch");
    p.kern_sum_b=CLKernelCreate(p.prog,"seg_sums_batch");
    p.kern_load_dt_b=CLKernelCreate(p.prog,"load_real_segment_detrend_batch");
+   p.kern_overlap=CLKernelCreate(p.prog,"overlap_add_complex");
+   p.kern_norm=CLKernelCreate(p.prog,"overlap_normalize");
    if(p.kern_bitrev==INVALID_HANDLE || p.kern_stage==INVALID_HANDLE || p.kern_scale==INVALID_HANDLE || p.kern_dft==INVALID_HANDLE || p.kern_load==INVALID_HANDLE || p.kern_sum==INVALID_HANDLE || p.kern_load_dt==INVALID_HANDLE ||
-      p.kern_bitrev_b==INVALID_HANDLE || p.kern_stage_b==INVALID_HANDLE || p.kern_scale_b==INVALID_HANDLE || p.kern_dft_b==INVALID_HANDLE || p.kern_load_b==INVALID_HANDLE || p.kern_sum_b==INVALID_HANDLE || p.kern_load_dt_b==INVALID_HANDLE)
+      p.kern_bitrev_b==INVALID_HANDLE || p.kern_stage_b==INVALID_HANDLE || p.kern_scale_b==INVALID_HANDLE || p.kern_dft_b==INVALID_HANDLE || p.kern_load_b==INVALID_HANDLE || p.kern_sum_b==INVALID_HANDLE || p.kern_load_dt_b==INVALID_HANDLE ||
+      p.kern_overlap==INVALID_HANDLE || p.kern_norm==INVALID_HANDLE)
      { CLFFTFree(p); return false; }
    p.memA=CLBufferCreate(p.ctx,N*sizeof(double)*2,CL_MEM_READ_WRITE);
    p.memB=CLBufferCreate(p.ctx,N*sizeof(double)*2,CL_MEM_READ_WRITE);
@@ -575,6 +605,7 @@ inline bool CLFFTExecuteBatchFromMemA(CLFFTPlan &p,const int batch,Complex64 &ou
       if(!CLExecute(p.kern_dft_b,1,offs0,work0)) return false;
       CLBufferRead(p.memB,buf);
       _unpack_complex(buf,outFlat);
+      p.memFinal=p.memB;
       return true;
      }
 
@@ -615,6 +646,113 @@ inline bool CLFFTExecuteBatchFromMemA(CLFFTPlan &p,const int batch,Complex64 &ou
      }
    CLBufferRead(finalMem,buf);
    _unpack_complex(buf,outFlat);
+   p.memFinal=finalMem;
+   return true;
+  }
+
+inline bool CLFFTExecuteBatchFromMemA_NoRead(CLFFTPlan &p,const int batch,const bool inverse)
+  {
+   if(!p.ready || batch<=0) return false;
+   if(p.batch!=batch) return false;
+   int N=p.N;
+   long total = (long)batch * (long)N;
+   bool pow2 = ((N & (N-1))==0);
+
+   if(!pow2)
+     {
+      CLSetKernelArgMem(p.kern_dft_b,0,p.memA);
+      CLSetKernelArgMem(p.kern_dft_b,1,p.memB);
+      CLSetKernelArg(p.kern_dft_b,2,N);
+      CLSetKernelArg(p.kern_dft_b,3,(int)(inverse?1:0));
+      uint offs0[1]={0}; uint work0[1]={(uint)total};
+      if(!CLExecute(p.kern_dft_b,1,offs0,work0)) return false;
+      p.memFinal=p.memB;
+      return true;
+     }
+
+   int bits=0; int tmp=N;
+   while(tmp>1){ bits++; tmp>>=1; }
+   CLSetKernelArgMem(p.kern_bitrev_b,0,p.memA);
+   CLSetKernelArgMem(p.kern_bitrev_b,1,p.memB);
+   CLSetKernelArg(p.kern_bitrev_b,2,N);
+   CLSetKernelArg(p.kern_bitrev_b,3,bits);
+   uint offs[1]={0}; uint work[1]={(uint)total};
+   if(!CLExecute(p.kern_bitrev_b,1,offs,work)) return false;
+
+   int m=2;
+   bool toggle=false;
+   while(m<=N)
+     {
+      int totalHalf = (N>>1) * batch;
+      int inMem= toggle ? p.memA : p.memB;
+      int outMem= toggle ? p.memB : p.memA;
+      CLSetKernelArgMem(p.kern_stage_b,0,inMem);
+      CLSetKernelArgMem(p.kern_stage_b,1,outMem);
+      CLSetKernelArg(p.kern_stage_b,2,N);
+      CLSetKernelArg(p.kern_stage_b,3,m);
+      CLSetKernelArg(p.kern_stage_b,4,(int)(inverse?1:0));
+      uint work2[1]={(uint)totalHalf};
+      if(!CLExecute(p.kern_stage_b,1,offs,work2)) return false;
+      toggle=!toggle;
+      m<<=1;
+     }
+   int finalMem = toggle ? p.memB : p.memA;
+   if(inverse)
+     {
+      double invN=1.0/(double)N;
+      CLSetKernelArgMem(p.kern_scale_b,0,finalMem);
+      CLSetKernelArg(p.kern_scale_b,1,(int)total);
+      CLSetKernelArg(p.kern_scale_b,2,invN);
+      if(!CLExecute(p.kern_scale_b,1,offs,work)) return false;
+     }
+   p.memFinal=finalMem;
+   return true;
+  }
+
+inline bool CLFFTOverlapAddFromFinal(CLFFTPlan &p,const int nseg,const int nperseg,const int nstep,const int N,const double &win[],const double scale,
+                                     Complex64 &out[],double &norm[])
+  {
+   if(p.memFinal==INVALID_HANDLE) return false;
+   if(p.memWin==INVALID_HANDLE || p.lenWin!=nperseg)
+     {
+      if(p.memWin!=INVALID_HANDLE) CLBufferFree(p.memWin);
+      p.memWin=CLBufferCreate(p.ctx,nperseg*sizeof(double),CL_MEM_READ_ONLY);
+      if(p.memWin==INVALID_HANDLE) return false;
+      p.lenWin=nperseg;
+      CLBufferWrite(p.memWin,win);
+     }
+   int outlen = nperseg + (nseg-1)*nstep;
+   if(p.memOutX!=INVALID_HANDLE) CLBufferFree(p.memOutX);
+   if(p.memOutNorm!=INVALID_HANDLE) CLBufferFree(p.memOutNorm);
+   p.memOutX=CLBufferCreate(p.ctx,outlen*sizeof(double)*2,CL_MEM_READ_WRITE);
+   p.memOutNorm=CLBufferCreate(p.ctx,outlen*sizeof(double),CL_MEM_READ_WRITE);
+   if(p.memOutX==INVALID_HANDLE || p.memOutNorm==INVALID_HANDLE) return false;
+
+   CLSetKernelArgMem(p.kern_overlap,0,p.memFinal);
+   CLSetKernelArgMem(p.kern_overlap,1,p.memWin);
+   CLSetKernelArg(p.kern_overlap,2,nseg);
+   CLSetKernelArg(p.kern_overlap,3,nperseg);
+   CLSetKernelArg(p.kern_overlap,4,nstep);
+   CLSetKernelArg(p.kern_overlap,5,N);
+   CLSetKernelArg(p.kern_overlap,6,outlen);
+   CLSetKernelArg(p.kern_overlap,7,scale);
+   CLSetKernelArgMem(p.kern_overlap,8,p.memOutX);
+   CLSetKernelArgMem(p.kern_overlap,9,p.memOutNorm);
+   uint offs[1]={0}; uint work[1]={(uint)outlen};
+   if(!CLExecute(p.kern_overlap,1,offs,work)) return false;
+
+   CLSetKernelArgMem(p.kern_norm,0,p.memOutX);
+   CLSetKernelArgMem(p.kern_norm,1,p.memOutNorm);
+   CLSetKernelArg(p.kern_norm,2,outlen);
+   if(!CLExecute(p.kern_norm,1,offs,work)) return false;
+
+   double buf[];
+   ArrayResize(buf,2*outlen);
+   ArrayResize(norm,outlen);
+   CLBufferRead(p.memOutX,buf);
+   CLBufferRead(p.memOutNorm,norm);
+   ArrayResize(out,outlen);
+   for(int i=0;i<outlen;i++) out[i]=Cx(buf[2*i],buf[2*i+1]);
    return true;
   }
 
