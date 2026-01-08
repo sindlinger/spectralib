@@ -92,15 +92,10 @@ inline void _fft_helper_1d(const double &x[],const double &win[],const int npers
          detrend_segments(tmp,detrend_type);
          for(int i=0;i<nperseg;i++) seg[i]=tmp[0][i];
         }
-      // apply window
-      for(int i=0;i<nperseg;i++) seg[i]*=win[i];
-      // zero-pad to nfft
-      double xpad[];
-      ArrayResize(xpad,nfft);
-      for(int i=0;i<nfft;i++) xpad[i]=(i<nperseg)?seg[i]:0.0;
-      // FFT (OpenCL float64)
+      // apply window + zero-pad on GPU, then FFT (OpenCL float64)
       Complex64 spec[];
-      CLFFTRealForward(plan,xpad,spec);
+      if(!CLFFTLoadRealSegment(plan,seg,win,0,nperseg,nfft)) { ArrayResize(out,0,0); return; }
+      if(!CLFFTExecuteFromMemA(plan,spec,false)) { ArrayResize(out,0,0); return; }
       if(sides==1)
         {
          for(int k=0;k<nfreq;k++) out[s][k]=spec[k];

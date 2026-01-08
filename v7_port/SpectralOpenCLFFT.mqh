@@ -11,9 +11,14 @@ struct CLFFTPlan
    int kern_stage;
    int kern_scale;
    int kern_dft;
+   int kern_load;
    int memA;
    int memB;
+   int memX;
+   int memWin;
    int N;
+   int lenX;
+   int lenWin;
    bool ready;
   };
 
@@ -25,9 +30,14 @@ inline void CLFFTReset(CLFFTPlan &p)
    p.kern_stage=INVALID_HANDLE;
    p.kern_scale=INVALID_HANDLE;
    p.kern_dft=INVALID_HANDLE;
+   p.kern_load=INVALID_HANDLE;
    p.memA=INVALID_HANDLE;
    p.memB=INVALID_HANDLE;
+   p.memX=INVALID_HANDLE;
+   p.memWin=INVALID_HANDLE;
    p.N=0;
+   p.lenX=0;
+   p.lenWin=0;
    p.ready=false;
   }
 
@@ -35,13 +45,17 @@ inline void CLFFTFree(CLFFTPlan &p)
   {
    if(p.memA!=INVALID_HANDLE) { CLBufferFree(p.memA); p.memA=INVALID_HANDLE; }
    if(p.memB!=INVALID_HANDLE) { CLBufferFree(p.memB); p.memB=INVALID_HANDLE; }
+   if(p.memX!=INVALID_HANDLE) { CLBufferFree(p.memX); p.memX=INVALID_HANDLE; }
+   if(p.memWin!=INVALID_HANDLE) { CLBufferFree(p.memWin); p.memWin=INVALID_HANDLE; }
    if(p.kern_bitrev!=INVALID_HANDLE) { CLKernelFree(p.kern_bitrev); p.kern_bitrev=INVALID_HANDLE; }
    if(p.kern_stage!=INVALID_HANDLE) { CLKernelFree(p.kern_stage); p.kern_stage=INVALID_HANDLE; }
    if(p.kern_scale!=INVALID_HANDLE) { CLKernelFree(p.kern_scale); p.kern_scale=INVALID_HANDLE; }
    if(p.kern_dft!=INVALID_HANDLE) { CLKernelFree(p.kern_dft); p.kern_dft=INVALID_HANDLE; }
+   if(p.kern_load!=INVALID_HANDLE) { CLKernelFree(p.kern_load); p.kern_load=INVALID_HANDLE; }
    if(p.prog!=INVALID_HANDLE) { CLProgramFree(p.prog); p.prog=INVALID_HANDLE; }
    if(p.ctx!=INVALID_HANDLE) { CLContextFree(p.ctx); p.ctx=INVALID_HANDLE; }
    p.N=0; p.ready=false;
+   p.lenX=0; p.lenWin=0;
   }
 
 inline bool CLFFTInit(CLFFTPlan &p,const int N)
@@ -80,7 +94,12 @@ inline bool CLFFTInit(CLFFTPlan &p,const int N)
    "    double2 v=in[n]; sum.x += v.x*c - v.y*s; sum.y += v.x*s + v.y*c;\n"
    "  }\n"
    "  if(inverse!=0){ sum.x/= (double)N; sum.y/=(double)N; }\n"
-   "  out[k]=sum; }\n";
+   "  out[k]=sum; }\n"
+   "__kernel void load_real_segment(__global const double* x, __global const double* win, __global double2* out,\n"
+   "  int xlen, int start, int nperseg, int nfft){\n"
+   "  int i=get_global_id(0); if(i>=nfft) return; double v=0.0;\n"
+   "  if(i<nperseg){ int idx=start+i; if(idx>=0 && idx<xlen){ v = x[idx]*win[i]; }}\n"
+   "  out[i]=(double2)(v,0.0); }\n";
 
    p.prog=CLProgramCreate(p.ctx,code);
    if(p.prog==INVALID_HANDLE) { CLFFTFree(p); return false; }
@@ -88,7 +107,8 @@ inline bool CLFFTInit(CLFFTPlan &p,const int N)
    p.kern_stage=CLKernelCreate(p.prog,"fft_stage");
    p.kern_scale=CLKernelCreate(p.prog,"fft_scale");
    p.kern_dft=CLKernelCreate(p.prog,"dft_complex");
-   if(p.kern_bitrev==INVALID_HANDLE || p.kern_stage==INVALID_HANDLE || p.kern_scale==INVALID_HANDLE || p.kern_dft==INVALID_HANDLE)
+   p.kern_load=CLKernelCreate(p.prog,"load_real_segment");
+   if(p.kern_bitrev==INVALID_HANDLE || p.kern_stage==INVALID_HANDLE || p.kern_scale==INVALID_HANDLE || p.kern_dft==INVALID_HANDLE || p.kern_load==INVALID_HANDLE)
      { CLFFTFree(p); return false; }
    p.memA=CLBufferCreate(p.ctx,N*sizeof(double)*2,CL_MEM_READ_WRITE);
    p.memB=CLBufferCreate(p.ctx,N*sizeof(double)*2,CL_MEM_READ_WRITE);
@@ -153,6 +173,107 @@ inline bool CLFFTExecute(CLFFTPlan &p,const Complex64 &in[],Complex64 &out[],con
    while(m<=N)
      {
       int half=m>>1;
+      int total=N>>1;
+      int inMem= toggle ? p.memA : p.memB;
+      int outMem= toggle ? p.memB : p.memA;
+      CLSetKernelArgMem(p.kern_stage,0,inMem);
+      CLSetKernelArgMem(p.kern_stage,1,outMem);
+      CLSetKernelArg(p.kern_stage,2,N);
+      CLSetKernelArg(p.kern_stage,3,m);
+      CLSetKernelArg(p.kern_stage,4,(int)(inverse?1:0));
+      uint work2[1]={(uint)total};
+      if(!CLExecute(p.kern_stage,1,offs,work2)) return false;
+      toggle=!toggle;
+      m<<=1;
+     }
+   int finalMem = toggle ? p.memB : p.memA;
+   if(inverse)
+     {
+      double invN=1.0/(double)N;
+      CLSetKernelArgMem(p.kern_scale,0,finalMem);
+      CLSetKernelArg(p.kern_scale,1,N);
+      CLSetKernelArg(p.kern_scale,2,invN);
+      if(!CLExecute(p.kern_scale,1,offs,work)) return false;
+     }
+   CLBufferRead(finalMem,buf);
+   _unpack_complex(buf,out);
+   return true;
+  }
+
+inline bool CLFFTUpldRealSeries(CLFFTPlan &p,const double &x[],const double &win[])
+  {
+   int xlen=ArraySize(x);
+   int wlen=ArraySize(win);
+   if(xlen<=0 || wlen<=0) return false;
+   if(p.memX==INVALID_HANDLE || p.lenX!=xlen)
+     {
+      if(p.memX!=INVALID_HANDLE) CLBufferFree(p.memX);
+      p.memX=CLBufferCreate(p.ctx,xlen*sizeof(double),CL_MEM_READ_ONLY);
+      if(p.memX==INVALID_HANDLE) return false;
+      p.lenX=xlen;
+     }
+   if(p.memWin==INVALID_HANDLE || p.lenWin!=wlen)
+     {
+      if(p.memWin!=INVALID_HANDLE) CLBufferFree(p.memWin);
+      p.memWin=CLBufferCreate(p.ctx,wlen*sizeof(double),CL_MEM_READ_ONLY);
+      if(p.memWin==INVALID_HANDLE) return false;
+      p.lenWin=wlen;
+     }
+   CLBufferWrite(p.memX,x);
+   CLBufferWrite(p.memWin,win);
+   return true;
+  }
+
+inline bool CLFFTLoadRealSegment(CLFFTPlan &p,const double &x[],const double &win[],const int start,const int nperseg,const int nfft)
+  {
+   if(!CLFFTInit(p,nfft)) return false;
+   if(!CLFFTUpldRealSeries(p,x,win)) return false;
+   CLSetKernelArgMem(p.kern_load,0,p.memX);
+   CLSetKernelArgMem(p.kern_load,1,p.memWin);
+   CLSetKernelArgMem(p.kern_load,2,p.memA);
+   CLSetKernelArg(p.kern_load,3,p.lenX);
+   CLSetKernelArg(p.kern_load,4,start);
+   CLSetKernelArg(p.kern_load,5,nperseg);
+   CLSetKernelArg(p.kern_load,6,nfft);
+   uint offs[1]={0};
+   uint work[1]={(uint)nfft};
+   return CLExecute(p.kern_load,1,offs,work);
+  }
+
+inline bool CLFFTExecuteFromMemA(CLFFTPlan &p,Complex64 &out[],const bool inverse)
+  {
+   if(!p.ready) return false;
+   int N=p.N;
+   bool pow2 = ((N & (N-1))==0);
+   double buf[];
+   ArrayResize(buf,2*N);
+
+   if(!pow2)
+     {
+      CLSetKernelArgMem(p.kern_dft,0,p.memA);
+      CLSetKernelArgMem(p.kern_dft,1,p.memB);
+      CLSetKernelArg(p.kern_dft,2,N);
+      CLSetKernelArg(p.kern_dft,3,(int)(inverse?1:0));
+      uint offs0[1]={0}; uint work0[1]={(uint)N};
+      if(!CLExecute(p.kern_dft,1,offs0,work0)) return false;
+      CLBufferRead(p.memB,buf);
+      _unpack_complex(buf,out);
+      return true;
+     }
+
+   int bits=0; int tmp=N;
+   while(tmp>1){ bits++; tmp>>=1; }
+   CLSetKernelArgMem(p.kern_bitrev,0,p.memA);
+   CLSetKernelArgMem(p.kern_bitrev,1,p.memB);
+   CLSetKernelArg(p.kern_bitrev,2,N);
+   CLSetKernelArg(p.kern_bitrev,3,bits);
+   uint offs[1]={0}; uint work[1]={(uint)N};
+   if(!CLExecute(p.kern_bitrev,1,offs,work)) return false;
+
+   int m=2;
+   bool toggle=false;
+   while(m<=N)
+     {
       int total=N>>1;
       int inMem= toggle ? p.memA : p.memB;
       int outMem= toggle ? p.memB : p.memA;
