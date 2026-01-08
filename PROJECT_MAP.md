@@ -19,6 +19,7 @@
 - `v7_port/SpectralImpl.mqh` (spectral_helper/STFT; em port OpenCL)
 - `v7_port/SpectralWaveforms.mqh` (waveforms OpenCL float64)
 - `v7_port/SpectralWavelets.mqh` (wavelets OpenCL float64)
+- `v7_port/SpectralConvolve.mqh` (convolucoes ordem 2/3 OpenCL float64)
 
 ## Fluxo de dados (pipeline)
 1. Feed (x/y/serie de entrada)
@@ -57,6 +58,11 @@
   - Responsabilidade: wavelets (qmf, morlet, morlet2, ricker, cwt) em OpenCL.
   - Inputs: dados, parametros de wavelet, widths.
   - Outputs: vetores/matrizes reais ou complexas.
+
+- `SpectralConvolve.mqh`
+  - Responsabilidade: convolucoes 1D de 2a e 3a ordem (valid) em OpenCL.
+  - Inputs: in1 1D, in2 2D/3D (filtros).
+  - Outputs: vetor resultado (valid).
 
 - `SavitzkyGolay.mqh`
   - Responsabilidade: coeficientes SG + convolucao (port OpenCL)
