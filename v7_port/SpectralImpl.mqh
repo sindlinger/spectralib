@@ -72,24 +72,24 @@ inline void _fft_helper_1d(const double &x[],const double &win[],const int npers
    int nfreq = (sides==1) ? (nfft/2+1) : nfft;
    for(int s=0;s<nseg;s++) ArrayResize(out[s],nfreq);
 
-   // For each segment (GPU: detrend + window + padding)
+   // Batch segments on GPU (detrend + window + padding + FFT)
    static CLFFTPlan plan;
    if(!plan.ready) CLFFTReset(plan);
-   if(!CLFFTInit(plan,nfft)) { ArrayResize(out,0,0); return; }
-   if(!CLFFTUpldRealSeries(plan,x,win)) { ArrayResize(out,0,0); return; }
+   if(!CLFFTLoadRealSegmentsDetrendBatch(plan,x,win,0,step,nperseg,nfft,detrend_type,nseg))
+     { ArrayResize(out,0,0); return; }
+   Complex64 specFlat[];
+   if(!CLFFTExecuteBatchFromMemA(plan,nseg,specFlat,false))
+     { ArrayResize(out,0,0); return; }
    for(int s=0;s<nseg;s++)
      {
-      int start=s*step;
-      Complex64 spec[];
-      if(!CLFFTLoadRealSegmentDetrendMem(plan,start,nperseg,nfft,detrend_type)) { ArrayResize(out,0,0); return; }
-      if(!CLFFTExecuteFromMemA(plan,spec,false)) { ArrayResize(out,0,0); return; }
+      int base=s*nfft;
       if(sides==1)
         {
-         for(int k=0;k<nfreq;k++) out[s][k]=spec[k];
+         for(int k=0;k<nfreq;k++) out[s][k]=specFlat[base + k];
         }
       else
         {
-         for(int k=0;k<nfft;k++) out[s][k]=spec[k];
+         for(int k=0;k<nfft;k++) out[s][k]=specFlat[base + k];
         }
      }
   }
