@@ -12,10 +12,13 @@ struct CLFFTPlan
    int kern_scale;
    int kern_dft;
    int kern_load;
+   int kern_sum;
+   int kern_load_dt;
    int memA;
    int memB;
    int memX;
    int memWin;
+   int memSum;
    int N;
    int lenX;
    int lenWin;
@@ -31,10 +34,13 @@ inline void CLFFTReset(CLFFTPlan &p)
    p.kern_scale=INVALID_HANDLE;
    p.kern_dft=INVALID_HANDLE;
    p.kern_load=INVALID_HANDLE;
+   p.kern_sum=INVALID_HANDLE;
+   p.kern_load_dt=INVALID_HANDLE;
    p.memA=INVALID_HANDLE;
    p.memB=INVALID_HANDLE;
    p.memX=INVALID_HANDLE;
    p.memWin=INVALID_HANDLE;
+   p.memSum=INVALID_HANDLE;
    p.N=0;
    p.lenX=0;
    p.lenWin=0;
@@ -47,11 +53,14 @@ inline void CLFFTFree(CLFFTPlan &p)
    if(p.memB!=INVALID_HANDLE) { CLBufferFree(p.memB); p.memB=INVALID_HANDLE; }
    if(p.memX!=INVALID_HANDLE) { CLBufferFree(p.memX); p.memX=INVALID_HANDLE; }
    if(p.memWin!=INVALID_HANDLE) { CLBufferFree(p.memWin); p.memWin=INVALID_HANDLE; }
+   if(p.memSum!=INVALID_HANDLE) { CLBufferFree(p.memSum); p.memSum=INVALID_HANDLE; }
    if(p.kern_bitrev!=INVALID_HANDLE) { CLKernelFree(p.kern_bitrev); p.kern_bitrev=INVALID_HANDLE; }
    if(p.kern_stage!=INVALID_HANDLE) { CLKernelFree(p.kern_stage); p.kern_stage=INVALID_HANDLE; }
    if(p.kern_scale!=INVALID_HANDLE) { CLKernelFree(p.kern_scale); p.kern_scale=INVALID_HANDLE; }
    if(p.kern_dft!=INVALID_HANDLE) { CLKernelFree(p.kern_dft); p.kern_dft=INVALID_HANDLE; }
    if(p.kern_load!=INVALID_HANDLE) { CLKernelFree(p.kern_load); p.kern_load=INVALID_HANDLE; }
+   if(p.kern_sum!=INVALID_HANDLE) { CLKernelFree(p.kern_sum); p.kern_sum=INVALID_HANDLE; }
+   if(p.kern_load_dt!=INVALID_HANDLE) { CLKernelFree(p.kern_load_dt); p.kern_load_dt=INVALID_HANDLE; }
    if(p.prog!=INVALID_HANDLE) { CLProgramFree(p.prog); p.prog=INVALID_HANDLE; }
    if(p.ctx!=INVALID_HANDLE) { CLContextFree(p.ctx); p.ctx=INVALID_HANDLE; }
    p.N=0; p.ready=false;
@@ -99,7 +108,19 @@ inline bool CLFFTInit(CLFFTPlan &p,const int N)
    "  int xlen, int start, int nperseg, int nfft){\n"
    "  int i=get_global_id(0); if(i>=nfft) return; double v=0.0;\n"
    "  if(i<nperseg){ int idx=start+i; if(idx>=0 && idx<xlen){ v = x[idx]*win[i]; }}\n"
-   "  out[i]=(double2)(v,0.0); }\n";
+   "  out[i]=(double2)(v,0.0); }\n"
+   "__kernel void seg_sums(__global const double* x, int xlen, int start, int nperseg, __global double* sumout){\n"
+   "  double sumx=0.0; double sumix=0.0; for(int i=0;i<nperseg;i++){\n"
+   "    int idx=start+i; if(idx>=0 && idx<xlen){ double v=x[idx]; sumx+=v; sumix+=v*(double)i; }\n"
+   "  } sumout[0]=sumx; sumout[1]=sumix; }\n"
+   "__kernel void load_real_segment_detrend(__global const double* x, __global const double* win, __global const double* sumout,\n"
+   "  int xlen, int start, int nperseg, int nfft, int detrend_type, double sum_i, double sum_i2, __global double2* out){\n"
+   "  int i=get_global_id(0); if(i>=nfft) return; double v=0.0;\n"
+   "  if(i<nperseg){ int idx=start+i; if(idx>=0 && idx<xlen){ double xi=x[idx];\n"
+   "    if(detrend_type==1){ double mean = sumout[0]/(double)nperseg; xi = xi - mean; }\n"
+   "    else if(detrend_type==2){ double n=(double)nperseg; double denom = n*sum_i2 - sum_i*sum_i; double m=0.0;\n"
+   "      if(denom!=0.0) m=(n*sumout[1] - sum_i*sumout[0])/denom; double b=(sumout[0]-m*sum_i)/n; xi = xi - (m*(double)i + b); }\n"
+   "    v = xi*win[i]; }} out[i]=(double2)(v,0.0); }\n";
 
    p.prog=CLProgramCreate(p.ctx,code);
    if(p.prog==INVALID_HANDLE) { CLFFTFree(p); return false; }
@@ -108,7 +129,9 @@ inline bool CLFFTInit(CLFFTPlan &p,const int N)
    p.kern_scale=CLKernelCreate(p.prog,"fft_scale");
    p.kern_dft=CLKernelCreate(p.prog,"dft_complex");
    p.kern_load=CLKernelCreate(p.prog,"load_real_segment");
-   if(p.kern_bitrev==INVALID_HANDLE || p.kern_stage==INVALID_HANDLE || p.kern_scale==INVALID_HANDLE || p.kern_dft==INVALID_HANDLE || p.kern_load==INVALID_HANDLE)
+   p.kern_sum=CLKernelCreate(p.prog,"seg_sums");
+   p.kern_load_dt=CLKernelCreate(p.prog,"load_real_segment_detrend");
+   if(p.kern_bitrev==INVALID_HANDLE || p.kern_stage==INVALID_HANDLE || p.kern_scale==INVALID_HANDLE || p.kern_dft==INVALID_HANDLE || p.kern_load==INVALID_HANDLE || p.kern_sum==INVALID_HANDLE || p.kern_load_dt==INVALID_HANDLE)
      { CLFFTFree(p); return false; }
    p.memA=CLBufferCreate(p.ctx,N*sizeof(double)*2,CL_MEM_READ_WRITE);
    p.memB=CLBufferCreate(p.ctx,N*sizeof(double)*2,CL_MEM_READ_WRITE);
@@ -221,6 +244,11 @@ inline bool CLFFTUpldRealSeries(CLFFTPlan &p,const double &x[],const double &win
      }
    CLBufferWrite(p.memX,x);
    CLBufferWrite(p.memWin,win);
+   if(p.memSum==INVALID_HANDLE)
+     {
+      p.memSum=CLBufferCreate(p.ctx,2*sizeof(double),CL_MEM_READ_WRITE);
+      if(p.memSum==INVALID_HANDLE) return false;
+     }
    return true;
   }
 
@@ -238,6 +266,86 @@ inline bool CLFFTLoadRealSegment(CLFFTPlan &p,const double &x[],const double &wi
    uint offs[1]={0};
    uint work[1]={(uint)nfft};
    return CLExecute(p.kern_load,1,offs,work);
+  }
+
+inline bool CLFFTLoadRealSegmentDetrend(CLFFTPlan &p,const double &x[],const double &win[],const int start,const int nperseg,const int nfft,const int detrend_type)
+  {
+   if(!CLFFTInit(p,nfft)) return false;
+   if(!CLFFTUpldRealSeries(p,x,win)) return false;
+   if(detrend_type==0)
+      return CLFFTLoadRealSegment(p,x,win,start,nperseg,nfft);
+
+   // compute sums on GPU (single work-item)
+   CLSetKernelArgMem(p.kern_sum,0,p.memX);
+   CLSetKernelArg(p.kern_sum,1,p.lenX);
+   CLSetKernelArg(p.kern_sum,2,start);
+   CLSetKernelArg(p.kern_sum,3,nperseg);
+   CLSetKernelArgMem(p.kern_sum,4,p.memSum);
+   uint offs0[1]={0}; uint work0[1]={1};
+   if(!CLExecute(p.kern_sum,1,offs0,work0)) return false;
+
+   // precomputed sums of i and i^2
+   double sum_i=0.0, sum_i2=0.0;
+   for(int i=0;i<nperseg;i++){ sum_i += (double)i; sum_i2 += (double)i*(double)i; }
+
+   CLSetKernelArgMem(p.kern_load_dt,0,p.memX);
+   CLSetKernelArgMem(p.kern_load_dt,1,p.memWin);
+   CLSetKernelArgMem(p.kern_load_dt,2,p.memSum);
+   CLSetKernelArg(p.kern_load_dt,3,p.lenX);
+   CLSetKernelArg(p.kern_load_dt,4,start);
+   CLSetKernelArg(p.kern_load_dt,5,nperseg);
+   CLSetKernelArg(p.kern_load_dt,6,nfft);
+   CLSetKernelArg(p.kern_load_dt,7,detrend_type);
+   CLSetKernelArg(p.kern_load_dt,8,sum_i);
+   CLSetKernelArg(p.kern_load_dt,9,sum_i2);
+   CLSetKernelArgMem(p.kern_load_dt,10,p.memA);
+   uint offs[1]={0}; uint work[1]={(uint)nfft};
+   return CLExecute(p.kern_load_dt,1,offs,work);
+  }
+
+inline bool CLFFTLoadRealSegmentDetrendMem(CLFFTPlan &p,const int start,const int nperseg,const int nfft,const int detrend_type)
+  {
+   if(!p.ready || p.memX==INVALID_HANDLE || p.memWin==INVALID_HANDLE) return false;
+   if(p.N!=nfft) return false;
+   if(detrend_type==0)
+     {
+      CLSetKernelArgMem(p.kern_load,0,p.memX);
+      CLSetKernelArgMem(p.kern_load,1,p.memWin);
+      CLSetKernelArgMem(p.kern_load,2,p.memA);
+      CLSetKernelArg(p.kern_load,3,p.lenX);
+      CLSetKernelArg(p.kern_load,4,start);
+      CLSetKernelArg(p.kern_load,5,nperseg);
+      CLSetKernelArg(p.kern_load,6,nfft);
+      uint offs[1]={0}; uint work[1]={(uint)nfft};
+      return CLExecute(p.kern_load,1,offs,work);
+     }
+
+   // compute sums on GPU (single work-item)
+   CLSetKernelArgMem(p.kern_sum,0,p.memX);
+   CLSetKernelArg(p.kern_sum,1,p.lenX);
+   CLSetKernelArg(p.kern_sum,2,start);
+   CLSetKernelArg(p.kern_sum,3,nperseg);
+   CLSetKernelArgMem(p.kern_sum,4,p.memSum);
+   uint offs0[1]={0}; uint work0[1]={1};
+   if(!CLExecute(p.kern_sum,1,offs0,work0)) return false;
+
+   // precomputed sums of i and i^2
+   double sum_i=0.0, sum_i2=0.0;
+   for(int i=0;i<nperseg;i++){ sum_i += (double)i; sum_i2 += (double)i*(double)i; }
+
+   CLSetKernelArgMem(p.kern_load_dt,0,p.memX);
+   CLSetKernelArgMem(p.kern_load_dt,1,p.memWin);
+   CLSetKernelArgMem(p.kern_load_dt,2,p.memSum);
+   CLSetKernelArg(p.kern_load_dt,3,p.lenX);
+   CLSetKernelArg(p.kern_load_dt,4,start);
+   CLSetKernelArg(p.kern_load_dt,5,nperseg);
+   CLSetKernelArg(p.kern_load_dt,6,nfft);
+   CLSetKernelArg(p.kern_load_dt,7,detrend_type);
+   CLSetKernelArg(p.kern_load_dt,8,sum_i);
+   CLSetKernelArg(p.kern_load_dt,9,sum_i2);
+   CLSetKernelArgMem(p.kern_load_dt,10,p.memA);
+   uint offs[1]={0}; uint work[1]={(uint)nfft};
+   return CLExecute(p.kern_load_dt,1,offs,work);
   }
 
 inline bool CLFFTExecuteFromMemA(CLFFTPlan &p,Complex64 &out[],const bool inverse)

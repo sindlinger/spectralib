@@ -72,29 +72,16 @@ inline void _fft_helper_1d(const double &x[],const double &win[],const int npers
    int nfreq = (sides==1) ? (nfft/2+1) : nfft;
    for(int s=0;s<nseg;s++) ArrayResize(out[s],nfreq);
 
-   // For each segment
+   // For each segment (GPU: detrend + window + padding)
    static CLFFTPlan plan;
    if(!plan.ready) CLFFTReset(plan);
-   double seg[];
-   ArrayResize(seg,nperseg);
+   if(!CLFFTInit(plan,nfft)) { ArrayResize(out,0,0); return; }
+   if(!CLFFTUpldRealSeries(plan,x,win)) { ArrayResize(out,0,0); return; }
    for(int s=0;s<nseg;s++)
      {
       int start=s*step;
-      for(int i=0;i<nperseg;i++) seg[i]=x[start+i];
-      // detrend
-      if(detrend_type!=DETREND_NONE)
-        {
-         // use 2D detrend helper by wrapping single segment
-         double tmp[1][];
-         ArrayResize(tmp,1);
-         ArrayResize(tmp[0],nperseg);
-         for(int i=0;i<nperseg;i++) tmp[0][i]=seg[i];
-         detrend_segments(tmp,detrend_type);
-         for(int i=0;i<nperseg;i++) seg[i]=tmp[0][i];
-        }
-      // apply window + zero-pad on GPU, then FFT (OpenCL float64)
       Complex64 spec[];
-      if(!CLFFTLoadRealSegment(plan,seg,win,0,nperseg,nfft)) { ArrayResize(out,0,0); return; }
+      if(!CLFFTLoadRealSegmentDetrendMem(plan,start,nperseg,nfft,detrend_type)) { ArrayResize(out,0,0); return; }
       if(!CLFFTExecuteFromMemA(plan,spec,false)) { ArrayResize(out,0,0); return; }
       if(sides==1)
         {
