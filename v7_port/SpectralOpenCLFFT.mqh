@@ -10,6 +10,7 @@ struct CLFFTPlan
    int kern_bitrev;
    int kern_stage;
    int kern_scale;
+   int kern_dft;
    int memA;
    int memB;
    int N;
@@ -23,6 +24,7 @@ inline void CLFFTReset(CLFFTPlan &p)
    p.kern_bitrev=INVALID_HANDLE;
    p.kern_stage=INVALID_HANDLE;
    p.kern_scale=INVALID_HANDLE;
+   p.kern_dft=INVALID_HANDLE;
    p.memA=INVALID_HANDLE;
    p.memB=INVALID_HANDLE;
    p.N=0;
@@ -36,6 +38,7 @@ inline void CLFFTFree(CLFFTPlan &p)
    if(p.kern_bitrev!=INVALID_HANDLE) { CLKernelFree(p.kern_bitrev); p.kern_bitrev=INVALID_HANDLE; }
    if(p.kern_stage!=INVALID_HANDLE) { CLKernelFree(p.kern_stage); p.kern_stage=INVALID_HANDLE; }
    if(p.kern_scale!=INVALID_HANDLE) { CLKernelFree(p.kern_scale); p.kern_scale=INVALID_HANDLE; }
+   if(p.kern_dft!=INVALID_HANDLE) { CLKernelFree(p.kern_dft); p.kern_dft=INVALID_HANDLE; }
    if(p.prog!=INVALID_HANDLE) { CLProgramFree(p.prog); p.prog=INVALID_HANDLE; }
    if(p.ctx!=INVALID_HANDLE) { CLContextFree(p.ctx); p.ctx=INVALID_HANDLE; }
    p.N=0; p.ready=false;
@@ -46,7 +49,7 @@ inline bool CLFFTInit(CLFFTPlan &p,const int N)
    if(p.ready && p.N==N) return true;
    CLFFTFree(p);
    CLFFTReset(p);
-   if(N<=1 || (N & (N-1))!=0) return false; // require power of 2
+   if(N<=1) return false;
    p.ctx=CLContextCreate(CL_USE_GPU_DOUBLE_ONLY);
    if(p.ctx==INVALID_HANDLE) return false;
 
@@ -67,14 +70,25 @@ inline bool CLFFTInit(CLFFTPlan &p,const int N)
    "  out[k+half] = (double2)(a.x - t.x, a.y - t.y);\n"
    "}\n"
    "__kernel void fft_scale(__global double2* data, int N, double invN){\n"
-   "  int i=get_global_id(0); if(i>=N) return; data[i].x*=invN; data[i].y*=invN; }\n";
+   "  int i=get_global_id(0); if(i>=N) return; data[i].x*=invN; data[i].y*=invN; }\n"
+   "__kernel void dft_complex(__global const double2* in, __global double2* out, int N, int inverse){\n"
+   "  int k=get_global_id(0); if(k>=N) return; double sign = (inverse!=0)? 1.0 : -1.0;\n"
+   "  double2 sum=(double2)(0.0,0.0);\n"
+   "  for(int n=0;n<N;n++){\n"
+   "    double ang = sign * 2.0 * M_PI * ((double)k * (double)n) / (double)N;\n"
+   "    double c=cos(ang); double s=sin(ang);\n"
+   "    double2 v=in[n]; sum.x += v.x*c - v.y*s; sum.y += v.x*s + v.y*c;\n"
+   "  }\n"
+   "  if(inverse!=0){ sum.x/= (double)N; sum.y/=(double)N; }\n"
+   "  out[k]=sum; }\n";
 
    p.prog=CLProgramCreate(p.ctx,code);
    if(p.prog==INVALID_HANDLE) { CLFFTFree(p); return false; }
    p.kern_bitrev=CLKernelCreate(p.prog,"bit_reverse");
    p.kern_stage=CLKernelCreate(p.prog,"fft_stage");
    p.kern_scale=CLKernelCreate(p.prog,"fft_scale");
-   if(p.kern_bitrev==INVALID_HANDLE || p.kern_stage==INVALID_HANDLE || p.kern_scale==INVALID_HANDLE)
+   p.kern_dft=CLKernelCreate(p.prog,"dft_complex");
+   if(p.kern_bitrev==INVALID_HANDLE || p.kern_stage==INVALID_HANDLE || p.kern_scale==INVALID_HANDLE || p.kern_dft==INVALID_HANDLE)
      { CLFFTFree(p); return false; }
    p.memA=CLBufferCreate(p.ctx,N*sizeof(double)*2,CL_MEM_READ_WRITE);
    p.memB=CLBufferCreate(p.ctx,N*sizeof(double)*2,CL_MEM_READ_WRITE);
@@ -105,9 +119,23 @@ inline bool CLFFTExecute(CLFFTPlan &p,const Complex64 &in[],Complex64 &out[],con
   {
    int N=ArraySize(in);
    if(!CLFFTInit(p,N)) return false;
+   bool pow2 = ((N & (N-1))==0);
    double buf[];
    _pack_complex(in,buf);
    CLBufferWrite(p.memA,buf);
+
+   if(!pow2)
+     {
+      CLSetKernelArgMem(p.kern_dft,0,p.memA);
+      CLSetKernelArgMem(p.kern_dft,1,p.memB);
+      CLSetKernelArg(p.kern_dft,2,N);
+      CLSetKernelArg(p.kern_dft,3,(int)(inverse?1:0));
+      uint offs0[1]={0}; uint work0[1]={(uint)N};
+      if(!CLExecute(p.kern_dft,1,offs0,work0)) return false;
+      CLBufferRead(p.memB,buf);
+      _unpack_complex(buf,out);
+      return true;
+     }
 
    // bit-reversal into memB
    int bits=0; int tmp=N;

@@ -4,8 +4,8 @@
 #include "SpectralCommon.mqh"
 #include "SpectralArrayTools.mqh"
 #include "SpectralSignalTools.mqh"
-#include "SpectralWindows.mqh"
-#include "SpectralFFT.mqh"
+#include "SpectralOpenCLWindows.mqh"
+#include "SpectralOpenCLFFT.mqh"
 #include "SpectralOpenCL.mqh"
 
 // Lomb-Scargle periodogram (OpenCL float64 only, no CPU fallback)
@@ -53,7 +53,7 @@ inline void _triage_segments(const string window,const int input_length,int &npe
   {
    if(nperseg<=0) nperseg=256;
    if(nperseg>input_length) nperseg=input_length;
-   get_window(window,nperseg,true,win);
+   CLGetWindow(window,nperseg,true,win);
   }
 
 // FFT helper for 1D x (returns 2D array: segments x nfft_complex)
@@ -73,6 +73,8 @@ inline void _fft_helper_1d(const double &x[],const double &win[],const int npers
    for(int s=0;s<nseg;s++) ArrayResize(out[s],nfreq);
 
    // For each segment
+   static CLFFTPlan plan;
+   if(!plan.ready) CLFFTReset(plan);
    double seg[];
    ArrayResize(seg,nperseg);
    for(int s=0;s<nseg;s++)
@@ -96,9 +98,9 @@ inline void _fft_helper_1d(const double &x[],const double &win[],const int npers
       double xpad[];
       ArrayResize(xpad,nfft);
       for(int i=0;i<nfft;i++) xpad[i]=(i<nperseg)?seg[i]:0.0;
-      // DFT
+      // FFT (OpenCL float64)
       Complex64 spec[];
-      FFTReal(xpad,spec);
+      CLFFTRealForward(plan,xpad,spec);
       if(sides==1)
         {
          for(int k=0;k<nfreq;k++) out[s][k]=spec[k];
