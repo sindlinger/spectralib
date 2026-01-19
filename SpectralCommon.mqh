@@ -3,6 +3,10 @@
 
 // Common math utilities and complex helpers for the spectral port (float64).
 
+#ifndef PI
+#define PI 3.1415926535897932384626433832795
+#endif
+
 struct Complex64
   {
    double re;

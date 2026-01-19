@@ -394,7 +394,7 @@ inline void chebwin(int M,double at,const bool sym,double &out[])
       double realv;
       if(x>1.0) realv=MathCosh(order*_acosh(x));
       else if(x<-1.0) realv=(odd?1.0:-1.0)*MathCosh(order*_acosh(-x));
-      else realv=MathCos(order*MathAcos(x));
+      else realv=MathCos(order*MathArccos(x));
       if(odd)
          p[i]=Cx(realv,0.0);
       else
@@ -529,7 +529,8 @@ inline void taylor(int M,int nbar,double sll,const bool norm,const bool sym,doub
 
 inline void get_window_params(const string win,const int Nx,const bool fftbins,const double &params[],double &out[])
   {
-   string name=StringToLower(win);
+   string name=win;
+   StringToLower(name);
    if(name=="boxcar" || name=="box" || name=="ones" || name=="rect" || name=="rectangular")
      { boxcar(Nx,!fftbins,out); return; }
    if(name=="triang" || name=="triangle" || name=="tri")

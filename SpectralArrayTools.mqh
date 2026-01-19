@@ -6,7 +6,7 @@
 // NOTE: MQL5 does not support true N-D array views. The helpers below
 // implement 1D extensions/slicing equivalent to SciPy/cusignal behavior.
 
-inline void odd_ext(const double &x[],const int n,double &out[])
+inline void odd_ext(const double &x[],int n,double &out[])
   {
    int N=ArraySize(x);
    if(n<1)
@@ -34,7 +34,7 @@ inline void odd_ext(const double &x[],const int n,double &out[])
      }
   }
 
-inline void even_ext(const double &x[],const int n,double &out[])
+inline void even_ext(const double &x[],int n,double &out[])
   {
    int N=ArraySize(x);
    if(n<1)
@@ -56,7 +56,7 @@ inline void even_ext(const double &x[],const int n,double &out[])
       out[n+N+i]=x[N-2-i];
   }
 
-inline void const_ext(const double &x[],const int n,double &out[])
+inline void const_ext(const double &x[],int n,double &out[])
   {
    int N=ArraySize(x);
    if(n<1)
@@ -72,7 +72,7 @@ inline void const_ext(const double &x[],const int n,double &out[])
    for(int i=0;i<n;i++) out[n+N+i]=x[N-1];
   }
 
-inline void zero_ext(const double &x[],const int n,double &out[])
+inline void zero_ext(const double &x[],int n,double &out[])
   {
    int N=ArraySize(x);
    if(n<1)
